@@ -3721,6 +3721,30 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
             except Exception as e:
                 logger.debug("Failed interrupting agent during shutdown: %s", e)
 
+    def _email_system_notice_redirect_target(self) -> tuple[Any, Optional[str], Optional[Dict[str, Any]]]:
+        """Return Telegram home target for operator-only email status notices.
+
+        Email should stay on-topic: final agent replies go back to the email
+        thread, but gateway lifecycle/status chatter (compaction, restart,
+        shutdown) belongs in the operator back-channel.  Prefer Telegram home
+        when configured; if it is absent, callers should suppress the notice
+        rather than send status mail into the user's email thread.
+        """
+        try:
+            adapter = self.adapters.get(Platform.TELEGRAM)
+            home = self.config.get_home_channel(Platform.TELEGRAM)
+        except Exception:
+            return None, None, None
+        if not adapter or not home or not home.chat_id:
+            return None, None, None
+        metadata = self._thread_metadata_for_target(
+            Platform.TELEGRAM,
+            home.chat_id,
+            home.thread_id,
+            adapter=adapter,
+        )
+        return adapter, str(home.chat_id), metadata
+
     async def _notify_active_sessions_of_shutdown(self) -> None:
         """Send shutdown/restart notifications to active chats and home channels.
 
@@ -3783,6 +3807,35 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
                 platform = Platform(platform_str)
                 adapter = self.adapters.get(platform)
                 if not adapter:
+                    continue
+
+                if platform == Platform.EMAIL:
+                    redirect_adapter, redirect_chat_id, redirect_metadata = self._email_system_notice_redirect_target()
+                    if not redirect_adapter or not redirect_chat_id:
+                        logger.info(
+                            "Email shutdown notification suppressed: no Telegram home channel configured"
+                        )
+                        continue
+                    email_label = chat_id
+                    redirected_msg = f"⚠️ Email session {email_label}: {msg}"
+                    result = await redirect_adapter.send(
+                        redirect_chat_id,
+                        redirected_msg,
+                        metadata=redirect_metadata,
+                    )
+                    if result is not None and getattr(result, "success", True) is False:
+                        logger.debug(
+                            "Failed to redirect email shutdown notification to telegram:%s: %s",
+                            redirect_chat_id,
+                            getattr(result, "error", "send returned success=False"),
+                        )
+                        continue
+                    notified.add(dedup_key)
+                    logger.info(
+                        "Redirected email shutdown notification for %s to telegram:%s",
+                        chat_id,
+                        redirect_chat_id,
+                    )
                     continue
 
                 platform_cfg = self.config.platforms.get(platform)
@@ -16828,7 +16881,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
             _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
 
         def _status_callback_sync(event_type: str, message: str) -> None:
-            if not _status_adapter or not _run_still_current():
+            if (not _status_adapter and source.platform != Platform.EMAIL) or not _run_still_current():
                 return
             prepared_message = _prepare_gateway_status_message(
                 source.platform,
@@ -16843,8 +16896,19 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
                     _redact_gateway_user_facing_secrets(str(message or ""))[:160],
                 )
                 return
+            status_adapter = _status_adapter
+            status_chat_id = _status_chat_id
+            status_metadata = _status_thread_metadata
+            if source.platform == Platform.EMAIL:
+                status_adapter, status_chat_id, status_metadata = self._email_system_notice_redirect_target()
+                if not status_adapter or not status_chat_id:
+                    logger.info(
+                        "Email status callback suppressed: no Telegram home channel configured"
+                    )
+                    return
+                prepared_message = f"Email session {source.chat_id}: {prepared_message}"
             _fut = safe_schedule_threadsafe(
-                _send_or_update_status_coro(_status_adapter, _status_chat_id, event_type, prepared_message, _status_thread_metadata),
+                _send_or_update_status_coro(status_adapter, status_chat_id, event_type, prepared_message, status_metadata),
                 _loop_for_step,
                 logger=logger,
                 log_message=f"status_callback ({event_type}) scheduling error",

@@ -662,6 +662,50 @@ async def test_shutdown_notifications_use_cached_live_thread_source_when_origin_
 
 
 @pytest.mark.asyncio
+async def test_email_shutdown_status_redirects_to_telegram_home_when_email_muted():
+    """Email sessions should not receive gateway status mail; operators see it in Telegram."""
+    from gateway.config import PlatformConfig
+    from tests.gateway.restart_test_helpers import RestartTestAdapter
+
+    runner, telegram_adapter = make_restart_runner()
+    telegram_adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="tg-status"))
+    email_adapter = RestartTestAdapter()
+    email_adapter.platform = Platform.EMAIL
+    email_adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="email-status"))
+    runner.adapters[Platform.EMAIL] = email_adapter
+    runner.config.platforms[Platform.EMAIL] = PlatformConfig(
+        enabled=True,
+        gateway_restart_notification=False,
+    )
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="ops-chat",
+        name="Ops Telegram",
+    )
+
+    source = make_restart_source(chat_id="user@example.com")
+    source.platform = Platform.EMAIL
+    source.user_id = "user@example.com"
+    source.user_name = "User"
+    session_key = build_session_key(source)
+    runner._running_agents[session_key] = object()
+    runner.session_store._entries[session_key] = MagicMock(origin=source)
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    email_adapter.send.assert_not_awaited()
+    assert telegram_adapter.send.await_count >= 1
+    redirected_calls = [
+        call for call in telegram_adapter.send.await_args_list
+        if call.args and "Email session user@example.com" in call.args[1]
+    ]
+    assert redirected_calls
+    call = redirected_calls[0]
+    assert call.args[0] == "ops-chat"
+    assert "Gateway shutting down" in call.args[1]
+
+
+@pytest.mark.asyncio
 async def test_restart_shutdown_notification_anchors_telegram_dm_topic():
     runner, adapter = make_restart_runner()
     runner._restart_requested = True

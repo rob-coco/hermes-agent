@@ -119,6 +119,9 @@ def make_restart_runner(
     runner._notify_active_sessions_of_shutdown = (
         GatewayRunner._notify_active_sessions_of_shutdown.__get__(runner, GatewayRunner)
     )
+    runner._email_system_notice_redirect_target = (
+        GatewayRunner._email_system_notice_redirect_target.__get__(runner, GatewayRunner)
+    )
     runner._cache_session_source = GatewayRunner._cache_session_source.__get__(
         runner, GatewayRunner
     )

@@ -787,7 +787,21 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         elif platform == Platform.SIGNAL:
             result = await _send_signal(pconfig.extra, chat_id, chunk)
         elif platform == Platform.EMAIL:
-            result = await _send_email(pconfig.extra, chat_id, chunk)
+            # Prefer the live gateway adapter so outbound Message-IDs and
+            # thread-scoped recipient authorization are recorded in the running
+            # email adapter.  Fall back to one-shot SMTP for out-of-process
+            # callers where no live adapter is available.
+            result = await _send_via_adapter(
+                platform,
+                pconfig,
+                chat_id,
+                chunk,
+                thread_id=thread_id,
+                media_files=media_files,
+                force_document=force_document,
+            )
+            if isinstance(result, dict) and result.get("error", "").startswith("No live adapter"):
+                result = await _send_email(pconfig.extra, chat_id, chunk)
         elif platform == Platform.SMS:
             result = await _send_sms(pconfig.api_key, chat_id, chunk)
         elif platform == Platform.MATRIX:

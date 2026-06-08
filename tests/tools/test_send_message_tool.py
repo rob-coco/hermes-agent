@@ -614,6 +614,44 @@ class TestSendToPlatformChunking:
         for call in send.await_args_list:
             assert len(call.args[2]) <= 2020  # each chunk fits the limit
 
+    def test_email_prefers_live_adapter_for_thread_recipient_tracking(self):
+        """Email sends should use the live adapter when available so reply authorization is recorded."""
+        adapter_send = AsyncMock(return_value={"success": True, "message_id": "<m@test.com>"})
+        standalone_send = AsyncMock(return_value={"success": True, "message_id": "standalone"})
+        with patch("tools.send_message_tool._send_via_adapter", adapter_send), \
+             patch("tools.send_message_tool._send_email", standalone_send):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.EMAIL,
+                    SimpleNamespace(enabled=True, token=None, extra={}),
+                    "recipient@example.com",
+                    "Hello recipient",
+                )
+            )
+
+        assert result["success"] is True
+        adapter_send.assert_awaited_once()
+        standalone_send.assert_not_awaited()
+
+    def test_email_falls_back_to_standalone_when_no_live_adapter(self):
+        """Out-of-process email sends still use standalone SMTP when no gateway adapter exists."""
+        adapter_send = AsyncMock(return_value={"error": "No live adapter for platform 'email'. Is the gateway running?"})
+        standalone_send = AsyncMock(return_value={"success": True, "message_id": "standalone"})
+        with patch("tools.send_message_tool._send_via_adapter", adapter_send), \
+             patch("tools.send_message_tool._send_email", standalone_send):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.EMAIL,
+                    SimpleNamespace(enabled=True, token=None, extra={}),
+                    "recipient@example.com",
+                    "Hello recipient",
+                )
+            )
+
+        assert result["success"] is True
+        adapter_send.assert_awaited_once()
+        standalone_send.assert_awaited_once_with({}, "recipient@example.com", "Hello recipient")
+
     def test_slack_messages_are_formatted_before_send(self, monkeypatch):
         _ensure_slack_mock(monkeypatch)
 
